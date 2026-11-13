@@ -7,6 +7,9 @@ import os
 import shutil
 from pathlib import Path
 import subprocess
+import socket
+import ssl
+import http.client
 import select
 import struct
 import sys
@@ -20,7 +23,7 @@ import zipfile
 from pg_backup.backup import Worker, ensure_key, recover, sha256, split_payload, verify_manifest
 from pg_backup.config import ManagerError, Store, atomic_json, dotenv, file_lock
 from pg_backup import scheduler
-from pg_backup.telegram import Telegram
+from pg_backup.telegram import Telegram, DirectHTTPSConnection, connect_tls, diagnose_network
 
 
 class TemporaryStore(unittest.TestCase):
@@ -85,7 +88,7 @@ class TelegramTests(unittest.TestCase):
         calls = []
         def transport(*args):
             calls.append(1)
-            return 403, {"description": "forbidden 123456:token"}
+            return 403, {"ok": False, "description": "forbidden 123456:token"}
         with self.assertRaisesRegex(ManagerError, "token hidden"):
             Telegram(self.config, transport).call("getMe")
         self.assertEqual(len(calls), 1)
@@ -141,22 +144,149 @@ class TelegramTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             file = Path(directory) / "part.bin"
             file.write_bytes(os.urandom(600000))
-            with patch.dict(os.environ, {"HTTPS_PROXY": "http://unreachable.invalid"}), patch("pg_backup.telegram.http.client.HTTPSConnection", return_value=connection):
+            with patch.dict(os.environ, {"HTTPS_PROXY": "http://unreachable.invalid"}), patch("pg_backup.telegram.DirectHTTPSConnection", return_value=connection):
                 self.assertEqual(Telegram(self.config).document(file), 12)
             self.assertEqual(sum(map(len, connection.sent)), int(connection.headers["Content-Length"]))
             self.assertTrue(all(len(chunk) <= 262144 for chunk in connection.sent[1:-1]))
             self.assertEqual(connection.host, "api.telegram.org")
 
-    def test_text_fields_have_no_extra_trailing_newline(self):
+    def test_setup_requests_use_json(self):
+        for method, fields in (("getMe", {}), ("getChat", {"chat_id": "-100123456789"})):
+            with self.subTest(method=method):
+                connection = unittest.mock.MagicMock()
+                response = connection.getresponse.return_value
+                response.status = 200
+                response.read.return_value = b'{"ok":true,"result":{}}'
+                with patch("pg_backup.telegram.DirectHTTPSConnection", return_value=connection):
+                    Telegram(self.config).call(method, fields)
+                body = b"".join(call.args[0] for call in connection.send.call_args_list)
+                self.assertEqual(json.loads(body), fields)
+                self.assertIn(unittest.mock.call("Content-Type", "application/json"), connection.putheader.call_args_list)
+                connection.close.assert_called_once()
+
+    def test_connection_errors_are_specific_without_exposing_tokens(self):
+        cases = [
+            (socket.gaierror(-2, "123456:token"), "DNS"),
+            (ssl.SSLCertVerificationError(1, "123456:token"), "certificate verification"),
+            (ssl.SSLError(1, "123456:token"), "TLS handshake"),
+            (socket.timeout("123456:token"), "timed out"),
+            (ConnectionRefusedError(111, "123456:token"), "refused"),
+            (http.client.RemoteDisconnected("123456:token"), "connection was closed"),
+        ]
+        for error, message in cases:
+            with self.subTest(error=type(error).__name__):
+                def transport(*args):
+                    raise error
+                with self.assertRaises(ManagerError) as caught:
+                    Telegram(self.config, transport, lambda _: None).call("getMe")
+                self.assertIn(message, str(caught.exception))
+                self.assertIn("getMe", str(caught.exception))
+                self.assertNotIn("123456:token", str(caught.exception))
+                self.assertNotIn("pending upload", str(caught.exception))
+
+    def test_certificate_failure_is_not_retried(self):
+        transport = unittest.mock.Mock(side_effect=ssl.SSLCertVerificationError(1, "bad cert"))
+        with self.assertRaisesRegex(ManagerError, "certificate verification"):
+            Telegram(self.config, transport, lambda _: None).call("getMe")
+        self.assertEqual(transport.call_count, 1)
+
+    def test_empty_http_400_reports_the_response_error_without_retrying(self):
         connection = unittest.mock.MagicMock()
         response = connection.getresponse.return_value
-        response.status = 200
-        response.read.return_value = b'{"ok":true,"result":{}}'
-        with patch("pg_backup.telegram.http.client.HTTPSConnection", return_value=connection):
-            Telegram(self.config).call("getChat", {"chat_id": "-100123456789"})
-        body = b"".join(call.args[0] for call in connection.send.call_args_list)
-        self.assertIn(b"-100123456789\r\n--pgbackup-", body)
-        self.assertNotIn(b"-100123456789\r\n\r\n--", body)
+        response.status = 400
+        response.read.return_value = b""
+        sleep = unittest.mock.Mock()
+        with patch("pg_backup.telegram.DirectHTTPSConnection", return_value=connection) as factory:
+            with self.assertRaisesRegex(ManagerError, "HTTP 400 returned an empty response") as caught:
+                Telegram(self.config, sleep=sleep).call("getMe")
+        self.assertIn("getMe", str(caught.exception))
+        self.assertNotIn(self.config["bot_token"], str(caught.exception))
+        factory.assert_called_once()
+        connection.close.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_html_response_reports_status_without_printing_body(self):
+        connection = unittest.mock.MagicMock()
+        response = connection.getresponse.return_value
+        response.status = 403
+        response.read.return_value = b'<html>123456:token</html>'
+        config = dict(self.config, retries=0)
+        with patch("pg_backup.telegram.DirectHTTPSConnection", return_value=connection):
+            with self.assertRaisesRegex(ManagerError, "HTTP 403") as caught:
+                Telegram(config).call("getMe")
+        self.assertNotIn("123456:token", str(caught.exception))
+        self.assertNotIn("<html>", str(caught.exception))
+        connection.close.assert_called_once()
+
+    def test_non_object_response_is_reported_without_traceback(self):
+        with self.assertRaisesRegex(ManagerError, "HTTP 200"):
+            Telegram(dict(self.config, retries=0), lambda *args: (200, []), lambda _: None).call("getMe")
+
+
+class DirectConnectionTests(unittest.TestCase):
+    ipv4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443))
+    ipv6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", 443, 0, 0))
+
+    def test_ipv4_is_used_before_unavailable_ipv6(self):
+        raw = unittest.mock.Mock()
+        context = unittest.mock.Mock()
+        with patch("pg_backup.telegram.socket.getaddrinfo", return_value=[self.ipv6, self.ipv4]), patch("pg_backup.telegram.socket.socket", return_value=raw) as factory:
+            result = connect_tls(context)
+        factory.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM, 6)
+        raw.connect.assert_called_once_with(self.ipv4[-1])
+        context.wrap_socket.assert_called_once_with(raw, server_hostname="api.telegram.org")
+        self.assertIs(result, context.wrap_socket.return_value)
+
+    def test_falls_back_to_ipv6_if_ipv4_is_unreachable(self):
+        raw4, raw6 = unittest.mock.Mock(), unittest.mock.Mock()
+        raw4.connect.side_effect = ConnectionRefusedError(111, "refused")
+        context = unittest.mock.Mock()
+        with patch("pg_backup.telegram.socket.getaddrinfo", return_value=[self.ipv6, self.ipv4]), patch("pg_backup.telegram.socket.socket", side_effect=[raw4, raw6]):
+            connect_tls(context)
+        raw4.close.assert_called_once()
+        raw6.connect.assert_called_once_with(self.ipv6[-1])
+        context.wrap_socket.assert_called_once_with(raw6, server_hostname="api.telegram.org")
+
+    def test_socket_creation_failure_can_fall_back_to_other_family(self):
+        raw6 = unittest.mock.Mock()
+        context = unittest.mock.Mock()
+        with patch("pg_backup.telegram.socket.getaddrinfo", return_value=[self.ipv4, self.ipv6]), patch("pg_backup.telegram.socket.socket", side_effect=[OSError(97, "Address family not supported"), raw6]):
+            connect_tls(context)
+        raw6.connect.assert_called_once_with(self.ipv6[-1])
+        context.wrap_socket.assert_called_once_with(raw6, server_hostname="api.telegram.org")
+
+    def test_certificate_failure_closes_socket_and_keeps_verification(self):
+        raw = unittest.mock.Mock()
+        context = unittest.mock.Mock()
+        context.wrap_socket.side_effect = ssl.SSLCertVerificationError(1, "bad cert")
+        with patch("pg_backup.telegram.socket.getaddrinfo", return_value=[self.ipv4]), patch("pg_backup.telegram.socket.socket", return_value=raw):
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                connect_tls(context)
+        raw.close.assert_called_once()
+
+    def test_request_timeout_is_applied_after_connection(self):
+        secure = unittest.mock.Mock()
+        connection = DirectHTTPSConnection("api.telegram.org", timeout=120, context=ssl.create_default_context())
+        with patch("pg_backup.telegram.connect_tls", return_value=secure):
+            connection.connect()
+        secure.settimeout.assert_called_once_with(120)
+        connection.close()
+
+    def test_probe_succeeds_with_ipv4_only_and_uses_no_credentials(self):
+        secure = unittest.mock.Mock()
+        lines = []
+        with patch("pg_backup.telegram.connect_tls", side_effect=[secure, OSError(101, "Network is unreachable")]), patch("pg_backup.telegram.http.client.HTTPConnection") as http:
+            http.return_value.getresponse.return_value.status = 302
+            self.assertTrue(diagnose_network(lines.append))
+        self.assertTrue(any("IPv4: OK" in line and "302" in line for line in lines))
+        self.assertTrue(any("IPv6:" in line and "Network is unreachable" in line for line in lines))
+        http.return_value.request.assert_called_once_with("HEAD", "/", headers={"Connection": "close"})
+        http.return_value.close.assert_called_once()
+
+    def test_network_command_requires_neither_root_nor_configuration(self):
+        from pg_backup.cli import main
+        with patch("pg_backup.cli.diagnose_network", return_value=True), patch("pg_backup.cli.require_root", side_effect=AssertionError("root requested")), patch("pg_backup.config.Store.load", side_effect=AssertionError("settings requested")):
+            self.assertEqual(main(["telegram-network"]), 0)
 
 
 class FakeTelegram:

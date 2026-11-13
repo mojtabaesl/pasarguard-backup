@@ -406,11 +406,11 @@ class Controller:
     def telegram(self):
         while True:
             c = self.store.load()
-            selected = self.view.choose("Telegram channel · settings are remembered", ["Check connection and posting permissions", "Send a small test file to this channel", "Change destination channel", "Change sender bot token", "Back"], [
+            selected = self.view.choose("Telegram channel · settings are remembered", ["Check connection and posting permissions", "Send a small test file to this channel", "Change destination channel", "Change sender bot token", "Test direct IPv4 / IPv6 connection", "Back"], [
                 "Channel: " + (c["channel_title"] or c["channel_id"] or "Not configured"),
                 "Sender token: " + mask(c["bot_token"]), "Connection: Direct HTTPS · no proxy",
                 "The bot publishes into the channel; it is not the destination."])
-            if selected in (None, 4):
+            if selected in (None, 5):
                 return
             if selected == 0:
                 self.job(["check-telegram"], "Checking channel permissions")
@@ -420,6 +420,8 @@ class Controller:
                 self.edit("channel_id", "Destination channel ID or @username")
             elif selected == 3:
                 self.edit("bot_token", "Sender bot token", secret=True)
+            elif selected == 4:
+                self.job(["telegram-network"], "Testing direct Telegram access")
 
     def set_enabled(self, enabled):
         if self.demo:

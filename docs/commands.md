@@ -4,7 +4,7 @@
 
 You can do most everyday tasks through `sudo pg-backup`. This page lists every command and option for running tasks directly.
 
-The commands below use an installed manager. Server commands need `sudo`; help, the demo, and recovering downloaded files do not. From a downloaded project folder, use `python3 pg-backup` instead of `pg-backup` (or `sudo python3 pg-backup` for server commands).
+The commands below use an installed manager. Server commands need `sudo`; help, the demo, the network check, and recovering downloaded files do not. From a downloaded project folder, use `python3 pg-backup` instead of `pg-backup` (or `sudo python3 pg-backup` for server commands).
 
 ## Menu and setup
 
@@ -73,8 +73,11 @@ Then follow the [official PasarGuard recovery guide](https://github.com/PasarGua
 | --- | --- |
 | `sudo pg-backup status` | Prints saved settings with the bot token hidden, the latest results, pending upload count, and next run. |
 | `sudo pg-backup diagnose` | Checks local tools, PasarGuard compatibility, recovery key status, and conflicting schedules. Sends no Telegram messages. |
+| `pg-backup telegram-network` | Tests direct IPv4 and IPv6 DNS, HTTPS and TLS access without needing credentials or sending messages. |
 | `sudo pg-backup check-telegram` | Checks the channel and the bot's posting permission. Sends no message or file. |
 | `sudo pg-backup test-upload` | Checks the channel and sends a small test document there. |
+
+If Telegram setup fails, run `pg-backup telegram-network`, then `sudo pg-backup check-telegram`. The manager tries IPv4 first and falls back to IPv6, so IPv6 failure alone does not prevent an IPv4 connection. Network errors identify DNS, certificate, timeout, or HTTP response problems without showing your token. A successful network check confirms connectivity; the channel check verifies the bot and posting permissions.
 
 ## Scheduling and encryption setup
 

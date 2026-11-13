@@ -79,7 +79,9 @@ sudo pg-backup disable
 
 Failed uploads and local-only backups are kept until you delete them yourself, so check storage occasionally. Automatic cleanup removes older local copies of successfully uploaded backups; it never deletes posts from your Telegram channel.
 
-If something fails, open **Status, logs and diagnostics**. If setup says your PasarGuard management script is too old, follow the [official management script instructions](https://github.com/PasarGuard/scripts) to update it. This manager does not update your panel.
+If something fails, open **Status, logs and diagnostics**. For Telegram connection problems, choose **Telegram channel settings → Test direct IPv4 / IPv6 connection**, or run `pg-backup telegram-network`. IPv4 is tried first; no proxy is needed when it works.
+
+If setup says your PasarGuard management script is too old, follow the [official management script instructions](https://github.com/PasarGuard/scripts) to update it. This manager does not update your panel.
 
 ## Useful commands
 
@@ -94,6 +96,7 @@ Most actions are available in the menu. These shortcuts are useful when you want
 | Retry pending uploads | `sudo pg-backup retry` |
 | List local backups and their IDs | `sudo pg-backup list` |
 | View settings and the latest result | `sudo pg-backup status` |
+| Check direct Telegram connectivity | `pg-backup telegram-network` |
 | Check the server for problems | `sudo pg-backup diagnose` |
 | Send a small test file to the channel | `sudo pg-backup test-upload` |
 | Enable automatic backups after setup | `sudo pg-backup enable` |

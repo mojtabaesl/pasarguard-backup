@@ -15,7 +15,7 @@ from . import __version__
 from .backup import Worker, ensure_key, native_compatible, recover, utc_now, verify_manifest
 from .config import ManagerError, Store, mask, read_json, require_root
 from . import scheduler
-from .telegram import Telegram
+from .telegram import Telegram, diagnose_network
 
 
 LAUNCHER = Path(__file__).resolve().parent.parent / "pg-backup"
@@ -47,6 +47,7 @@ def parser():
     commands.add_parser("status", help="Print status and settings with the bot token hidden")
     commands.add_parser("list", help="List local backups")
     commands.add_parser("diagnose", help="Check local dependencies and installation; no Telegram messages sent")
+    commands.add_parser("telegram-network", help="Test direct IPv4/IPv6 HTTPS access without credentials or sending messages")
     commands.add_parser("check-telegram", help="Check channel identity and posting permissions; no message sent")
     commands.add_parser("test-upload", help="Send a small test document to the channel")
     commands.add_parser("key-init", help="Generate an age recovery key once; never overwrites an existing key")
@@ -114,6 +115,8 @@ def main(argv=None):
         if args.command == "recover":
             recover(args.manifest, args.output, args.identity)
             return 0
+        if args.command == "telegram-network":
+            return 0 if diagnose_network() else 1
         require_root()
         if args.command in (None, "menu", "setup"):
             if not sys.stdin.isatty():
