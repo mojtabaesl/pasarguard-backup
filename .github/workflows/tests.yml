@@ -1,0 +1,17 @@
+name: Verify manager
+on: [push, pull_request]
+jobs:
+  verify:
+    # Python 3.9 builds are available for this image; avoid ubuntu-latest migrations.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.9'
+      - name: Install encryption tools
+        run: sudo apt-get update && sudo apt-get install -y age
+      - name: Check shell syntax
+        run: bash -n install.sh pg_backup/native-backup.sh
+      - name: Run tests, including real encryption and recovery
+        run: python3 -m unittest discover -s tests -v
